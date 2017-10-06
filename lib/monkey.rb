@@ -3,9 +3,33 @@ require 'mini_magick'
 
 class Monkey
 
-  def initialize(verbose: false, &block)
+  def initialize(verbose: false, default_size: nil, device: nil, host: nil, port: nil, extra_options: nil, &block)
     instance_eval &block if block
     @verbose = verbose
+    @radio_width = 1
+    @radio_height = 1
+
+    @adb = ['adb']
+    @adb << "-s #{device}" if device
+    @adb << "-H #{host}" if host
+    @adb << "-P #{port}" if port
+    @adb << extra_options if extra_options
+    @adb = @adb.join(' ')
+
+    if default_size
+      if adb('shell dumpsys window displays | grep init', capture: true) =~ /init=(\d+)x(\d+)/
+        @radio_width = default_size[0].to_f / $1.to_i
+        @radio_height = default_size[1].to_f / $2.to_i
+      end
+    end
+  end
+
+  def self.connect(host_and_port)
+    adb "connect #{host_and_port}"
+  end
+
+  def self.disconnect(host_and_port)
+    adb "disconnect #{host_and_port}"
   end
 
   def text(string)
@@ -20,10 +44,18 @@ class Monkey
   end
 
   def tap(x, y)
+    x = (x * @radio_width).to_i
+    y = (y * @radio_height).to_i
+
     adb_shell "input tap #{x} #{y}"
   end
 
   def swipe(x1, y1, x2, y2, duration = nil)
+    x1 = (x1 * @radio_width).to_i
+    x2 = (x2 * @radio_width).to_i
+    y1 = (y1 * @radio_height).to_i
+    y2 = (y2 * @radio_height).to_i
+
     command = "input swipe #{x1} #{y1} #{x2} #{y2}"
     command += " #{duration}" if duration
     adb_shell command
@@ -52,7 +84,7 @@ class Monkey
   end
 
   def install(path, package = nil)
-    return if package && adb_capture("shell pm list packages | grep #{package}") != ""
+    return if package && adb("shell pm list packages | grep #{package}", capture: true) != ""
     adb "install -rdg #{path}"
   end
 
@@ -68,23 +100,34 @@ class Monkey
     adb "push #{path}"
   end
 
-  def adb(subcommand)
-    command = "adb #{subcommand}"
-    puts "Run command: #{command}" if @verbose
-    system command
+  def adb(subcommand, capture: false)
+    self.class.adb(subcommand, adb: @adb, capture: capture, verbose: @verbose)
   end
 
-  def adb_capture(subcommand)
-    command = "adb #{subcommand}"
-    puts "Run command: #{command}" if @verbose
-    `#{command}`
+  def self.adb(subcommand, adb: 'adb', capture: false, verbose: true)
+    command = "#{adb} #{subcommand}"
+    puts "Run command: #{command}" if verbose
+    if capture then `#{command}` else system command end
+  end
+
+  def screencap_file
+    adb "exec-out screencap -p > screencap.png"
   end
 
   def screencap
-    bytes = adb_capture "exec-out screencap"
+    bytes = adb "exec-out screencap", capture: true
     width, height, ptype = bytes.unpack('LLL')
     raise RuntimeError, "cannot handle pixel format: #{ptype}, check https://developer.android.com/reference/android/graphics/PixelFormat.html for more details" unless ptype == 1
     MiniMagick::Image.import_pixels bytes, width, height, 8, 'rgba'
+  end
+
+  def self.devices
+    `adb devices`
+      .each_line
+      .drop(1)
+      .map(&:strip)
+      .reject(&:empty?)
+      .map{|line| line.split("\t").first}
   end
 
   KEYCODE = {
